@@ -1,0 +1,5 @@
+base_config: configs/ltgate.yaml
+tau_fast: 0.005  # 5ms
+tau_slow: 0.050  # 50ms (10x ratio)
+variant_tag: tau10
+seeds: [0,1,2]

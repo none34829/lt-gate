@@ -1,0 +1,5 @@
+base_config: configs/ltgate.yaml
+gamma_strategy: fixed
+gamma_fixed_value: 0.5
+variant_tag: gamma_fixed
+seeds: [0,1,2]

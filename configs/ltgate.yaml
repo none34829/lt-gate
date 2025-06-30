@@ -1,0 +1,42 @@
+# LT-Gate Algorithm Configuration
+
+# Algorithm selection
+alg: ltgate
+
+# Basic training parameters
+batch_size: 32
+epochs: 100
+seed: 42
+debug: false
+
+# LT-Gate hyperparameters
+eta: 0.01                # Base learning rate for weight updates
+eta_v: 0.001             # Learning rate for principal vector updates (Oja's rule)
+variance_lambda: 0.001   # Decay factor for variance tracking
+pre_decay: 0.8          # Decay factor for presynaptic traces
+
+# Network architecture parameters
+tau_fast: 0.005         # Fast time constant (5ms)
+tau_slow: 0.1           # Slow time constant (100ms)
+dt: 0.001               # Simulation timestep (1ms)
+reset_mechanism: subtract  # Neuron reset mechanism (subtract or zero)
+
+# Network layer configuration
+conv_layers:
+  - {in_channels: 1, out_channels: 16, kernel_size: 3, stride: 1, padding: 1}
+  - {in_channels: 16, out_channels: 32, kernel_size: 3, stride: 2, padding: 1}
+  - {in_channels: 32, out_channels: 64, kernel_size: 3, stride: 2, padding: 1}
+
+fc_layers:
+  - {in_features: 3136, out_features: 256}  # 3136 = 64 * 7 * 7 (assuming 28x28 MNIST input)
+  - {in_features: 256, out_features: 10}
+
+# Readout parameters
+readout_scaling: 1.0
+
+# Evaluation metrics
+metrics:
+  - accuracy
+  - loss
+  - spike_count
+  - var_ratio  # Mean of gamma (fraction of neurons using fast branch)

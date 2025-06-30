@@ -1,0 +1,23 @@
+# Core dependencies
+torch>=2.0.0
+h5py>=3.8.0
+numpy>=1.24.0
+pandas>=2.0.0
+pandas-stubs>=2.0.0  # Type stubs for pandas
+matplotlib>=3.7.0
+seaborn>=0.13.0  # Required for advanced violin plots
+scipy>=1.10.0
+pingouin>=0.5.4  # For robust effect-size & Bayesian tests
+jupyter>=1.0.0
+tqdm>=4.65.0
+
+# Neuromorphic hardware
+akida>=2.13.0
+cnn2snn>=2.13.0
+quantizeml>=2.13.0
+akida-models>=1.7.0
+
+# Testing and development
+pytest>=7.3.1
+mypy>=1.5.1
+types-h5py>=3.8.0  # Type stubs for h5py

@@ -1,0 +1,5 @@
+base_config: configs/ltgate.yaml
+tau_fast: null   # Disable fast branch
+tau_slow: 0.100  # 100ms
+variant_tag: nofast
+seeds: [0,1,2]
