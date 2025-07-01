@@ -3,11 +3,14 @@ Checkpoint management utilities for LT-Gate training.
 """
 
 import os
-import torch
+import json
+import logging
 from pathlib import Path
+import torch  # type: ignore
 
+from typing import Dict, Optional, Union
 
-def save_checkpoint(model, epoch, tag, metrics=None, ckpt_dir="ckpts"):
+def save_checkpoint(model: torch.nn.Module, epoch: int, tag: str, metrics: Optional[Dict[str, Union[float, int, str]]] = None, ckpt_dir: str = "ckpts") -> None:
     """
     Save model checkpoint with RNG states and metrics.
     

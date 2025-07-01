@@ -1,10 +1,11 @@
-import torch
-import torch.nn as nn
+import torch  # type: ignore
+import torch.nn as nn  # type: ignore
 import numpy as np
 
 # For Lava-DL compatibility
+# type: ignore[import]
 try:
-    from lava.lib.dl.slayer.block import slayer_block
+    from lava.lib.dl.slayer.block import slayer_block  # type: ignore
     HAS_LAVA = True
 except ImportError:
     HAS_LAVA = False

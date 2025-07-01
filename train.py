@@ -40,6 +40,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.model import build_backbone, SNNBackbone
 from src.data_loader import load_dataset, DatasetSplit
 from src.algorithms.ltgate import LTGateTrainer
+from src.algorithms.hlop import HLOPTrainer
 
 
 def parse_args():
@@ -52,7 +53,7 @@ def parse_args():
     parser.add_argument(
         "--config", 
         type=str, 
-        default="configs/ltgate.yaml", 
+        default=None,  # Will be set based on algorithm
         help="Path to configuration file")
     
     # Algorithm selection
@@ -153,8 +154,10 @@ def load_config(config_path):
     Returns:
         dict: Configuration dictionary
     """
+    print(f"Loading config from: {config_path}")
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
+    print(f"Loaded config: {cfg}")
     return cfg
 
 
@@ -169,6 +172,7 @@ def update_config_with_args(cfg, args):
     Returns:
         dict: Updated configuration dictionary
     """
+    print("Config before update:", cfg)
     # Override algorithm
     if args.alg:
         cfg['alg'] = args.alg
@@ -203,6 +207,10 @@ def update_config_with_args(cfg, args):
     if args.loihi_check:
         cfg['loihi_constraints'] = True
         
+    # Update GPU flag
+    if args.gpu:
+        cfg['gpu'] = True
+        
     return cfg
 
 
@@ -222,7 +230,7 @@ def setup_training(cfg):
     torch.manual_seed(seed)
     
     # Device configuration
-    use_gpu = torch.cuda.is_available() and args.gpu
+    use_gpu = torch.cuda.is_available() and cfg.get('gpu', False)
     device = torch.device("cuda" if use_gpu else "cpu")
     print(f"Using device: {device} ({'GPU' if use_gpu else 'CPU'})")
     
@@ -238,7 +246,7 @@ def setup_training(cfg):
     return device, seed
 
 
-def train_epoch(model, trainer, data_loader, device, debug=False, max_batches=None):
+def train_epoch(model, trainer, data_loader, device, debug=False):
     """
     Train for one epoch.
     
@@ -248,35 +256,21 @@ def train_epoch(model, trainer, data_loader, device, debug=False, max_batches=No
         data_loader (DataLoader): Training data loader
         device (torch.device): Device to train on
         debug (bool): If True, will enable verbose logging
-        max_batches (int, optional): Maximum number of batches to process (for debugging)
         
     Returns:
         dict: Training metrics for the epoch
     """
-    global global_spike_counter, spike_counts
-    
     model.train()
     total_correct = 0
     total_samples = 0
-    batch_times = []
-    epoch_spikes = 0
+    total_spikes = 0.0
+    total_loss = 0.0
     
-    # Reset per-layer spike counters
-    spike_counts.clear()
-    
-    # Limit batches in debug mode
-    if max_batches is None and debug:
-        max_batches = 5
-    
-    # Use tqdm for progress bar
-    progress_bar = tqdm(data_loader, desc="Training")
+    # Progress bar
+    pbar = tqdm(data_loader, desc="Training")
     
     try:
-        for batch_idx, (sequences, targets) in enumerate(progress_bar):
-            if max_batches is not None and batch_idx >= max_batches:
-                print(f"Reached max_batches limit ({max_batches}). Stopping early.")
-                break
-            
+        for batch_idx, (sequences, targets) in enumerate(pbar):
             batch_start = time.time()
             
             if debug and batch_idx == 0:
@@ -312,14 +306,10 @@ def train_epoch(model, trainer, data_loader, device, debug=False, max_batches=No
                         # Track spikes for this timestep
                         if hasattr(model, 'spike_counts'):
                             for layer_name, count in model.spike_counts.items():
-                                spike_counts[layer_name] += count
-                                epoch_spikes += count
+                                total_spikes += count
                         
                         # Accumulate output
                         output = timestep_output if output is None else output + timestep_output
-            
-            # Update global spike counter
-            global_spike_counter += epoch_spikes
             
             # Compute accuracy
             predictions = torch.argmax(output, dim=1)
@@ -328,15 +318,19 @@ def train_epoch(model, trainer, data_loader, device, debug=False, max_batches=No
             total_samples += targets.size(0)
             
             # Update progress bar
-            accuracy = 100.0 * total_correct / total_samples
-            spikes_per_sample = epoch_spikes / total_samples
-            progress_bar.set_postfix({
-                'acc': f"{accuracy:.2f}%",
-                'spikes/sample': f"{spikes_per_sample:.1f}"
-            })
-            
-            # Record batch time
-            batch_times.append(time.time() - batch_start)
+            acc = 100.0 * total_correct / total_samples if total_samples > 0 else 0.0
+            spikes_per_sample = total_spikes / total_samples if total_samples > 0 else 0.0
+            avg_loss = total_loss / len(data_loader) if len(data_loader) > 0 else 0.0
+            pbar.set_postfix(acc=f"{acc:.2f}%", loss=f"{avg_loss:.4f}", spikes_per_sample=f"{spikes_per_sample:.1f}")
+
+        pbar.close()
+        
+        # Return metrics
+        return {
+            "accuracy": acc,
+            "spikes_per_sample": spikes_per_sample,
+            "loss": avg_loss,
+        }        
             
     except Exception as e:
         print(f"Error during training: {str(e)}")
@@ -492,8 +486,7 @@ def create_trainer(model, cfg):
     if algorithm == 'ltgate':
         return LTGateTrainer(model, cfg)
     elif algorithm == 'hlop':
-        # TODO: Implement HLOP trainer
-        raise NotImplementedError("HLOP trainer not implemented yet")
+        return HLOPTrainer(model, cfg)
     elif algorithm == 'dsdsnn':
         # TODO: Implement DSD-SNN trainer
         raise NotImplementedError("DSD-SNN trainer not implemented yet")
@@ -508,6 +501,10 @@ def main():
     """
     # Parse command line arguments
     args = parse_args()
+    
+    # Set config path based on algorithm if not explicitly provided
+    if args.config is None:
+        args.config = f"configs/{args.alg}.yaml"
     
     # Load configuration
     cfg = load_config(args.config)

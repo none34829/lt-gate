@@ -8,21 +8,23 @@ Run energy and latency measurements on Akida hardware or virtual device.
 import os
 import sys
 import json
+import logging
+from pathlib import Path
 import time
-import h5py
-import numpy as np
+import h5py  # type: ignore
+import numpy as np  # type: ignore
 import argparse
-from akida import devices, TwoNodesIPv2
+from akida import devices, TwoNodesIPv2  # type: ignore
 
 
-def h5_iterator(path):
+def h5_iterator(path: str) -> iter:
     """Iterate over test sequences in H5 file."""
     with h5py.File(path) as f:
         for k in f['test'].keys():
             yield f['test'][k][()], f['test'][k].attrs['label']
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Run Akida energy measurements")
     parser.add_argument("model_path", type=str, help="Path to Akida model (.fbz)")
     parser.add_argument("test_path", type=str, help="Path to test dataset (.h5)")

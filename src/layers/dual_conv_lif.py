@@ -1,6 +1,6 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import torch  # type: ignore
+import torch.nn as nn  # type: ignore
+import torch.nn.functional as F  # type: ignore
 
 from src.layers.dual_lif_neuron import DualLIFNeuron
 
@@ -13,7 +13,8 @@ class DualConvLIF(nn.Module):
     """
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1,
                  tau_fast=5e-3, tau_slow=100e-3, dt=1e-3, threshold=0.5,
-                 reset_mechanism="subtract", variance_lambda=0.01):
+                 reset_mechanism="subtract", variance_lambda=0.01,
+                 eta_h=1e-3):
         """Initialize DualConvLIF layer
         
         Args:
@@ -28,6 +29,7 @@ class DualConvLIF(nn.Module):
             threshold (float): Firing threshold
             reset_mechanism (str): Reset mechanism after spike - 'subtract' or 'zero'
             variance_lambda (float): Decay constant for variance tracking
+            eta_h (float): Learning rate for Hebbian updates
         """
         super().__init__()
         
@@ -71,7 +73,8 @@ class DualConvLIF(nn.Module):
         
         # Hebbian learning parameters
         self.enable_learning = False  # Will be enabled during training
-        self.learning_rate = 0.01
+        self.eta_h = eta_h  # Learning rate for Hebbian updates
+        self.mse = nn.MSELoss(reduction='mean')
         
         # For tracking layer output size
         self.output_height = None
@@ -125,39 +128,46 @@ class DualConvLIF(nn.Module):
         spikes_fast, spikes_slow, spikes_merged = self.dual_lif(combined_input)
         
         # Apply Hebbian learning if enabled (during training)
+        recon_loss = 0.0
         if self.training and self.enable_learning:
-            self._apply_hebbian_update(combined_input, spikes_fast, spikes_slow)
+            recon_loss = self._apply_hebbian_update(x, spikes_fast, spikes_slow)
         
         # Reshape back to [batch_size, channels, height, width]
         spikes = spikes_merged.reshape(batch_size, channels, height, width)
         
-        return spikes
+        return spikes, recon_loss
     
-    def _apply_hebbian_update(self, inputs, spikes_fast, spikes_slow):
-        """Apply local Hebbian learning updates to weights
+    @torch.no_grad()
+    def _apply_hebbian_update(self, input_tensor, spikes_fast, spikes_slow):
+        """Apply Hebbian learning update to weights.
         
         Args:
-            inputs (torch.Tensor): Input tensor [batch_size, num_neurons]
-            spikes_fast (torch.Tensor): Fast pathway spikes [batch_size, num_neurons]
-            spikes_slow (torch.Tensor): Slow pathway spikes [batch_size, num_neurons]
+            input_tensor (torch.Tensor): Input to the layer
+            spikes_fast (torch.Tensor): Fast neuron spikes
+            spikes_slow (torch.Tensor): Slow neuron spikes
+            
+        Returns:
+            float: Reconstruction loss for this update
         """
-        # Simple Hebbian update: strengthen weights where both pre and post are active
-        # We'll use batch-averaged activity
-        with torch.no_grad():
-            batch_size = inputs.shape[0]
-            # Calculate pre-post correlation across batch samples
-            prepost_fast = torch.mm(inputs.t(), spikes_fast) / batch_size
-            prepost_slow = torch.mm(inputs.t(), spikes_slow) / batch_size
-            
-            # Apply updates to weights
-            # Note: in a real implementation, we would need to map these updates
-            # back to the convolutional weights properly
-            delta_fast = self.learning_rate * prepost_fast
-            delta_slow = self.learning_rate * prepost_slow
-            
-            # For now, just update the internal weights of the DualLIF neuron
-            self.dual_lif.weight_fast += delta_fast
-            self.dual_lif.weight_slow += delta_slow
+        if not self.enable_learning:
+            return 0.0
+        
+        # Compute reconstruction loss
+        recon_loss = 0.0
+        
+        # Fast pathway update and loss
+        dw_fast = torch.mm(spikes_fast.t(), input_tensor) * self.eta_h
+        self.conv_fast.weight.data += dw_fast.view_as(self.conv_fast.weight)
+        recon_fast = torch.mm(spikes_fast, self.conv_fast.weight.view(-1, self.conv_fast.in_channels))
+        recon_loss += self.mse(recon_fast, input_tensor)
+        
+        # Slow pathway update and loss
+        dw_slow = torch.mm(spikes_slow.t(), input_tensor) * self.eta_h
+        self.conv_slow.weight.data += dw_slow.view_as(self.conv_slow.weight)
+        recon_slow = torch.mm(spikes_slow, self.conv_slow.weight.view(-1, self.conv_slow.in_channels))
+        recon_loss += self.mse(recon_slow, input_tensor)
+        
+        return recon_loss / input_tensor.shape[0]
     
     def reset_state(self):
         """Reset neuron states"""

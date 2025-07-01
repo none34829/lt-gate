@@ -1,0 +1,21 @@
+alg: hlop
+proj_dim: 20          # dimension of subspace projection
+eta_h: 0.001         # learning rate for Hebbian subspace update
+eta_w: 0.001         # Hebbian main weight learning rate (must match HLOPTrainer)
+tau: 0.010          # 10 ms time constant
+
+# HLOP training parameters
+epochs: 25           # epochs per task
+weight_decay: 0.0001 # L2 regularization
+
+# Training parameters
+batch_size: 32
+epochs_task1: 25
+epochs_task2: 25
+lr: 0.001
+weight_decay: 0.0001
+
+# Model architecture (same as LT-Gate backbone)
+hidden_channels: [32, 64]
+kernel_size: 3
+stride: 1

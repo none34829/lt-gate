@@ -11,10 +11,10 @@ dataset splits and DataLoader objects.
 
 import os
 import enum
-import torch
+import torch  # type: ignore
 import numpy as np
-import h5py
-from torch.utils.data import Dataset, DataLoader
+import h5py  # type: ignore
+from torch.utils.data import Dataset, DataLoader  # type: ignore
 from pathlib import Path
 
 # Define project root path

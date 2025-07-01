@@ -9,10 +9,10 @@ import os
 import sys
 import json
 import argparse
-import torch
+import torch  # type: ignore
 import numpy as np
 from pathlib import Path
-import lava.lib.dl.slayer as slayer
+import lava.lib.dl.slayer as slayer  # type: ignore
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

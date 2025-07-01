@@ -1,5 +1,5 @@
-import torch
-import torch.nn as nn
+import torch  # type: ignore
+import torch.nn as nn  # type: ignore
 import numpy as np
 import logging
 from collections import defaultdict
@@ -89,6 +89,7 @@ class LTGateTrainer:
         # Other training parameters
         self.pre_decay = cfg.get('pre_decay', 0.8)  # Decay factor for presynaptic traces
     
+    @torch.no_grad()
     def step(self, seq):
         """
         Process a sequence batch and apply LT-Gate updates.
@@ -97,16 +98,22 @@ class LTGateTrainer:
             seq (torch.Tensor): Input sequence of shape [time_steps, batch_size, channels, height, width]
             
         Returns:
-            torch.Tensor: Output spikes from the final time step
+            tuple: (final output spikes, reconstruction loss)
         """
         device = seq.device
+        
+        # Ensure sequence is in [T,B,C,H,W] format
+        if seq.size(0) != 200:  # Not in time-first format
+            seq = seq.transpose(0, 1)  # [B,T,C,H,W] -> [T,B,C,H,W]
+        
         time_steps, batch_size = seq.shape[0], seq.shape[1]
         
         # Reset model state at the beginning of each sequence
         self._reset_state()
         
-        # Track final output for return
+        # Track final output and loss
         final_output = None
+        total_loss = 0.0
         
         # Process each time step in the sequence
         for t in range(time_steps):
@@ -119,8 +126,9 @@ class LTGateTrainer:
             output = self.model(x_t)  # [batch_size, out_channels, height, width]
             final_output = output
             
-            # Apply local plasticity updates to LT-Gate layers
-            self._apply_lt_gate_updates()
+            # Apply local plasticity updates and compute loss
+            step_loss = self._apply_lt_gate_updates()
+            total_loss += step_loss
         
         # Increment step counter for diagnostics
         self.step_count += 1
@@ -129,7 +137,9 @@ class LTGateTrainer:
         if self.enable_diagnostics and self.step_count % self.tracking_interval == 0:
             self._run_diagnostics()
         
-        return final_output
+        # Return average loss over sequence
+        avg_loss = total_loss / time_steps
+        return final_output, avg_loss
     
     def _run_diagnostics(self):
         """
@@ -314,24 +324,28 @@ class LTGateTrainer:
                 # Assuming first conv layer gets direct input
                 batch_avg = pre_flat.mean(0)  # Average across batch
                 self.traces[name] = self.traces[name] + batch_avg.flatten()
-    
+
     def _apply_lt_gate_updates(self):
         """
-        Apply LT-Gate updates to all LTConv layers in the model.
+        Apply local plasticity updates to all LT-Gate layers.
+        
+        Returns:
+            float: Total reconstruction loss for this timestep
         """
-        for name, m in self.model.named_modules():
-            if isinstance(m, LTConv):
-                # Get presynaptic trace for this layer
-                pre_trace = self.current_input  # Simplified: using input for all layers
-                
-                # Get the binary spike outputs from fast and slow neurons
-                # These are stored in the LTConv's cell during the forward pass
-                post_spikes_f = m.cell.u_f >= m.cell.threshold  # Fast neuron spikes
-                post_spikes_s = m.cell.u_s >= m.cell.threshold  # Slow neuron spikes
-                
-                # Apply local update using LT-Gate rule
-                m.local_update(pre_trace, post_spikes_f, post_spikes_s)
-    
+        total_loss = 0.0
+        mse = nn.MSELoss(reduction='mean')
+        
+        # Update all LT-Gate layers
+        for name, layer in self.ltconv_layers.items():
+            # Get current traces for this layer
+            traces = self.traces[name]
+            
+            # Apply local plasticity update
+            recon_loss = layer.local_update(traces, self.eta)
+            total_loss += recon_loss
+        
+        return total_loss
+
     def _reset_state(self):
         """
         Reset the state of all neurons in the model and clear traces.

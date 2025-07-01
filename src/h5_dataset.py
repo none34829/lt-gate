@@ -2,9 +2,9 @@
 H5 sequence dataset loader for LT-Gate training.
 """
 
-import h5py
-import torch
-from torch.utils.data import Dataset, IterableDataset
+import h5py  # type: ignore
+import torch  # type: ignore
+from torch.utils.data import Dataset, IterableDataset  # type: ignore
 import numpy as np
 
 

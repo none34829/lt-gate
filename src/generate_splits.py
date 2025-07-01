@@ -1,9 +1,9 @@
-import torch
-import torchvision
+import torch  # type: ignore
+import torchvision  # type: ignore
 import pathlib
 import numpy as np
-import h5py
-from tqdm import tqdm
+import h5py  # type: ignore
+from tqdm import tqdm  # type: ignore
 
 # Set fixed random seeds for reproducibility
 torch.manual_seed(1234)

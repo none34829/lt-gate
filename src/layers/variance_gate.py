@@ -1,4 +1,4 @@
-import torch
+import torch  # type: ignore
 
 class VarianceGate(torch.nn.Module):
     """

@@ -1,33 +1,19 @@
-import torch
-import torch.nn as nn
-import yaml
+import torch  # type: ignore
+import torch.nn as nn  # type: ignore
+import yaml  # type: ignore
 
 # Import our custom layers - new implementation
 from src.layers.lif_neuron import LIFNeuron
 from src.layers.dual_lif_neuron import DualLIFNeuron
 from src.layers.conv_lif import ConvLIF
 from src.layers.dual_conv_lif import DualConvLIF
-
-# HLOP projector (we'll implement this properly later)
-class HLOPProjector(nn.Module):
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        # Initialize weights and masks
-        self.register_parameter('weights', nn.Parameter(torch.randn(out_features, in_features) * 0.01))
-        self.register_buffer('mask', torch.ones(out_features, in_features))
-        
-    def forward(self, x):
-        # Apply masking
-        masked_weights = self.weights * self.mask
-        # Apply projection
-        return torch.matmul(x, masked_weights.t())
+from src.layers.hlop_conv import HLOPConv
 
 # For Lava-DL compatibility
+# type: ignore[import]
 try:
-    import lava.lib.dl.slayer as slayer
-    from lava.lib.dl import slayer2loihi
+    import lava.lib.dl.slayer as slayer  # type: ignore
+    from lava.lib.dl import slayer2loihi  # type: ignore
     HAS_LAVA = True
 except ImportError:
     HAS_LAVA = False
@@ -67,52 +53,79 @@ class SNNBackbone(nn.Module):
             # LT-Gate uses dual compartment neurons
             ConvLayerType = DualConvLIF
             self.is_dual = True
+        elif self.algorithm == 'hlop':
+            # HLOP uses single compartment neurons with subspace projection
+            ConvLayerType = HLOPConv
+            self.is_dual = False
         else:
-            # HLOP and DSD use single compartment neurons
+            # DSD uses single compartment neurons
             ConvLayerType = ConvLIF
             self.is_dual = False
         
         # Build network layers
-        self.conv0 = ConvLayerType(
-            in_channels=1,
-            out_channels=32,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            tau_fast=self.tau_fast,
-            tau_slow=self.tau_slow,
-            dt=self.dt
-        )
-        
-        self.conv1 = ConvLayerType(
-            in_channels=32,
-            out_channels=32,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            tau_fast=self.tau_fast,
-            tau_slow=self.tau_slow,
-            dt=self.dt
-        )
-        
-        self.conv2 = ConvLayerType(
-            in_channels=32,
-            out_channels=64,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            tau_fast=self.tau_fast,
-            tau_slow=self.tau_slow,
-            dt=self.dt
-        )
+        if self.algorithm == 'hlop':
+            # HLOP requires positional args for in_ch, out_ch
+            # HLOP doesn't use padding by default
+            self.conv0 = ConvLayerType(1, 32, k=3, stride=1,
+                                      proj_dim=config.get('proj_dim', 20),
+                                      eta_h=config.get('eta_h', 1e-3),
+                                      tau=config.get('tau', 10e-3))
+            
+            self.conv1 = ConvLayerType(32, 32, k=3, stride=1,
+                                      proj_dim=config.get('proj_dim', 20),
+                                      eta_h=config.get('eta_h', 1e-3),
+                                      tau=config.get('tau', 10e-3))
+            
+            self.conv2 = ConvLayerType(32, 64, k=3, stride=1,
+                                      proj_dim=config.get('proj_dim', 20),
+                                      eta_h=config.get('eta_h', 1e-3),
+                                      tau=config.get('tau', 10e-3))
+        else:
+            # LT-Gate and DSD use keyword args
+            self.conv0 = ConvLayerType(
+                in_channels=1,
+                out_channels=32,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                tau_fast=self.tau_fast,
+                tau_slow=self.tau_slow,
+                dt=self.dt
+            )
+            
+            self.conv1 = ConvLayerType(
+                in_channels=32,
+                out_channels=32,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                tau_fast=self.tau_fast,
+                tau_slow=self.tau_slow,
+                dt=self.dt
+            )
+            
+            self.conv2 = ConvLayerType(
+                in_channels=32,
+                out_channels=64,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                tau_fast=self.tau_fast,
+                tau_slow=self.tau_slow,
+                dt=self.dt
+            )
         
         # Flatten layer
         self.flatten = nn.Flatten()
         
         # Calculate flattened size (assuming 28x28 input)
-        # After 3 convs with padding=1 and stride=1, spatial dims remain 28x28
-        # Adjust if using different input dimensions or stride > 1
-        self.flat_size = 64 * 28 * 28
+        # For HLOP, we don't use padding so spatial dims reduce
+        if self.algorithm == 'hlop':
+            # No padding, kernel=3: 28->26->24->22
+            self.flat_size = 64 * 22 * 22
+        else:
+            # With padding=1: spatial dims stay 28x28
+            self.flat_size = 64 * 28 * 28
         
         # Fully connected and readout layers
         if self.is_dual:
