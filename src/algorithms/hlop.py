@@ -10,6 +10,11 @@ class HLOPTrainer:
         self.net = net
         self.eta_w = cfg['eta_w']
 
+    def to(self, device):
+        """Move trainer to device (for compatibility with LTGateTrainer)"""
+        self.net = self.net.to(device)
+        return self
+
     def step(self, seq):
         for t in range(seq.size(0)):
             spikes = self.net(seq[t])

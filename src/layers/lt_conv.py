@@ -2,9 +2,9 @@ import torch  # type: ignore
 import torch.nn as nn  # type: ignore
 import torch.nn.functional as F  # type: ignore
 
-from src.layers.dual_lif_neuron import DualLIFNeuron
-from src.layers.variance_gate import VarianceGate
-from src.layers.projector import OneVectorProjector
+from .dual_lif_neuron import DualLIFNeuron
+from .variance_gate import VarianceGate
+from .projector import OneVectorProjector
 
 class LTConv(nn.Module):
     """
@@ -135,6 +135,10 @@ class LTConv(nn.Module):
         
         # Process through DualLIF neurons
         spikes_fast, spikes_slow, spikes_merged = self.cell(combined_input)
+        
+        # Store spikes for LT-Gate updates (flattened for compatibility)
+        self.last_spikes_fast = spikes_fast  # [B, C*H*W]
+        self.last_spikes_slow = spikes_slow  # [B, C*H*W]
         
         # Extract per-channel spikes for variance gate update
         # We need to reshape back to [batch, channels, height, width]

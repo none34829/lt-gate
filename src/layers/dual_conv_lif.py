@@ -2,7 +2,7 @@ import torch  # type: ignore
 import torch.nn as nn  # type: ignore
 import torch.nn.functional as F  # type: ignore
 
-from src.layers.dual_lif_neuron import DualLIFNeuron
+from .dual_lif_neuron import DualLIFNeuron
 
 class DualConvLIF(nn.Module):
     """
@@ -127,6 +127,10 @@ class DualConvLIF(nn.Module):
         # Process through DualLIF neurons
         spikes_fast, spikes_slow, spikes_merged = self.dual_lif(combined_input)
         
+        # Store spikes for LT-Gate updates (flattened for compatibility)
+        self.last_spikes_fast = spikes_fast  # [B, C*H*W]
+        self.last_spikes_slow = spikes_slow  # [B, C*H*W]
+        
         # Apply Hebbian learning if enabled (during training)
         recon_loss = 0.0
         if self.training and self.enable_learning:
@@ -136,6 +140,31 @@ class DualConvLIF(nn.Module):
         spikes = spikes_merged.reshape(batch_size, channels, height, width)
         
         return spikes, recon_loss
+    
+    def local_update(self, pre_trace, post_spikes_f, post_spikes_s):
+        """
+        Apply local Hebbian updates to weights (compatibility with LTGateTrainer).
+        
+        Args:
+            pre_trace (torch.Tensor): Pre-synaptic trace [batch_size, in_features]
+            post_spikes_f (torch.Tensor): Fast post-synaptic spikes [batch_size, out_channels*h*w]
+            post_spikes_s (torch.Tensor): Slow post-synaptic spikes [batch_size, out_channels*h*w]
+        """
+        # Reshape pre_trace to match input format
+        batch_size = post_spikes_f.size(0)
+        in_channels = self.conv_fast.in_channels
+        kernel_size = self.kernel_size
+        
+        # Reshape pre_trace to [batch_size, in_channels, kernel_size, kernel_size]
+        if pre_trace.dim() == 2:
+            # If pre_trace is [batch_size, in_features], reshape it
+            pre_trace_reshaped = pre_trace.view(batch_size, in_channels, kernel_size, kernel_size)
+        else:
+            pre_trace_reshaped = pre_trace
+        
+        # Apply the existing Hebbian update method
+        recon_loss = self._apply_hebbian_update(pre_trace_reshaped, post_spikes_f, post_spikes_s)
+        return recon_loss
     
     @torch.no_grad()
     def _apply_hebbian_update(self, input_tensor, spikes_fast, spikes_slow):

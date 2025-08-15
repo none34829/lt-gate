@@ -17,8 +17,8 @@ import lava.lib.dl.slayer as slayer  # type: ignore
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.model import build_backbone
-from src.h5_dataset import H5SequenceDataset
+from model import build_backbone
+from h5_dataset import H5SequenceDataset
 
 
 def quantize_model(model, bits=8):

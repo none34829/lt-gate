@@ -98,12 +98,8 @@ class AnalogMNISTDataset(Dataset):
         # Load the sequence data on demand
         sequence = torch.from_numpy(self.group[key][:]).float()
         
-        # Use the key as the label (assuming keys are digits)
-        try:
-            label = int(key)
-        except ValueError:
-            # If key can't be converted to int, use index as placeholder
-            label = idx
+        # Get the actual label from the HDF5 file attributes
+        label = self.group[key].attrs['label']
         
         if self.transform:
             sequence = self.transform(sequence)

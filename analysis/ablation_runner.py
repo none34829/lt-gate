@@ -28,32 +28,27 @@ def run_ablation(cfg_path: str, seed: int) -> None:
     env = os.environ.copy()
     env['PYTHONHASHSEED'] = str(seed)
     
-    # Task 1 training
+    # Task 1 training (fast dataset)
     cmd1 = [
-        'python', 'src/train.py',
-        cfg_path,
-        '--dataset', 'data/fast/train.h5',
-        '--phase', 'task1',
-        '--seed', str(seed),
-        '--logdir', f'logs/ablations/{tag}/seed_{seed}'
+        'python', 'train.py',
+        '--config', cfg_path,
+        '--dataset', 'fast',
+        '--seed', str(seed)
     ]
     subprocess.run(cmd1, env=env, check=True)
     
-    # Task 2 training (resume from Task 1)
+    # Task 2 training (slow dataset) - resume from Task 1
     cmd2 = [
-        'python', 'src/train.py',
-        cfg_path,
-        '--resume', f'logs/ablations/{tag}/seed_{seed}/ckpt_task1.pt',
-        '--dataset', 'data/slow/train.h5',
-        '--phase', 'task2',
-        '--seed', str(seed),
-        '--logdir', f'logs/ablations/{tag}/seed_{seed}'
+        'python', 'train.py',
+        '--config', cfg_path,
+        '--dataset', 'slow',
+        '--seed', str(seed)
     ]
     subprocess.run(cmd2, env=env, check=True)
     
     # Energy measurement (Akida)
     cmd3 = [
-        'python', 'src/run_akida.py',
+        'python', 'tools/run_akida.py',
         f'logs/ablations/{tag}/seed_{seed}/ckpt_task2.pt',
         'data/slow/test.h5',
         f'logs/ablations/{tag}/seed_{seed}/energy.json'

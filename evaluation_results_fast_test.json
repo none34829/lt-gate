@@ -1,0 +1,13 @@
+{
+  "checkpoint": "checkpoints\\ltgate_fast_20250810_074540.pt",
+  "epoch": 60,
+  "val_accuracy": 52.77777777777778,
+  "dataset": "fast",
+  "split": "test",
+  "test_accuracy": 27.0,
+  "test_accuracy_percent": 27.0,
+  "total_samples": 100,
+  "batch_time": 0.22391581535339355,
+  "total_time": 0.8956632614135742,
+  "device": "cpu"
+}

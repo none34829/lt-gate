@@ -40,3 +40,13 @@ metrics:
   - loss
   - spike_count
   - var_ratio  # Mean of gamma (fraction of neurons using fast branch)
+
+# Pre-training threshold calibration
+calibration:
+  enabled: true      # or use --calibrate on the CLI
+  target_rate: 0.02  # 2% per-timestep spike fraction
+  batches: 10
+  iters: 3
+  tolerance: 0.50    # ±50%
+  min_threshold: 0.05
+  max_threshold: 2.0

@@ -141,6 +141,11 @@ def parse_args():
         action="store_true", 
         help="Check Loihi hardware mapping constraints")
     
+    parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="Run pre-training threshold calibration (unsupervised)")
+    
     return parser.parse_args()
 
 
@@ -157,7 +162,20 @@ def load_config(config_path):
     print(f"Loading config from: {config_path}")
     with open(config_path, 'r') as f:
         cfg = yaml.safe_load(f)
-    print(f"Loaded config: {cfg}")
+    
+    # Handle base_config inheritance for ablation studies
+    if 'base_config' in cfg:
+        base_config_path = cfg['base_config']
+        print(f"Loading base config from: {base_config_path}")
+        with open(base_config_path, 'r') as f:
+            base_cfg = yaml.safe_load(f)
+        
+        # Merge base config with ablation config (ablation config overrides base)
+        base_cfg.update(cfg)
+        cfg = base_cfg
+        print(f"Loaded base config and merged with ablation config")
+    
+    print(f"Final config: {cfg}")
     return cfg
 
 
@@ -277,14 +295,50 @@ def train_epoch(model, trainer, data_loader, device, debug=False):
                 print(f"\nInput shapes - sequences: {sequences.shape}, targets: {targets.shape}")
             
             # Move data to device
-            sequences = sequences.to(device)
+            sequences = sequences.to(device, non_blocking=True)
             targets = targets.to(device)
+            
+            # Debug print for first batch
+            if batch_idx == 0:
+                print("targets dbg:", targets.dtype, targets.min().item(), targets.max().item(), targets.shape)
             
             # Reset model state
             model.reset_state()
             
-            # Process with mixed precision
-            with torch.cuda.amp.autocast(enabled=True, dtype=torch.float16):
+            # Process with mixed precision (only if CUDA is available)
+            if torch.cuda.is_available():
+                with torch.amp.autocast('cuda', enabled=False):  # temporarily force FP32
+                    if isinstance(trainer, LTGateTrainer):
+                        # Handle sequence format
+                        if sequences.size(0) != 200:
+                            sequences = sequences.transpose(0, 1)
+                            if debug and batch_idx == 0:
+                                print(f"Transposed sequences shape: {sequences.shape}")
+                        
+                        # LT-Gate forward pass and updates
+                        step_result = trainer.step(sequences, targets)
+                        if isinstance(step_result, tuple):
+                            output = step_result[0]  # Extract output from (output, loss) tuple
+                        else:
+                            output = step_result
+                    else:
+                        # Other algorithms
+                        time_steps = sequences.shape[0] if sequences.shape[0] == 200 else sequences.shape[1]
+                        output = None
+                        
+                        for t in range(time_steps):
+                            x_t = sequences[t] if sequences.shape[0] == 200 else sequences[:, t]
+                            timestep_output = model(x_t)
+                            
+                            # Track spikes for this timestep
+                            if hasattr(model, 'spike_counts'):
+                                for layer_name, count in model.spike_counts.items():
+                                    total_spikes += count
+                            
+                            # Accumulate output
+                            output = timestep_output if output is None else output + timestep_output
+            else:
+                # CPU training without mixed precision
                 if isinstance(trainer, LTGateTrainer):
                     # Handle sequence format
                     if sequences.size(0) != 200:
@@ -293,7 +347,11 @@ def train_epoch(model, trainer, data_loader, device, debug=False):
                             print(f"Transposed sequences shape: {sequences.shape}")
                     
                     # LT-Gate forward pass and updates
-                    output = trainer.step(sequences)
+                    step_result = trainer.step(sequences, targets)
+                    if isinstance(step_result, tuple):
+                        output = step_result[0]  # Extract output from (output, loss) tuple
+                    else:
+                        output = step_result
                 else:
                     # Other algorithms
                     time_steps = sequences.shape[0] if sequences.shape[0] == 200 else sequences.shape[1]
@@ -312,10 +370,14 @@ def train_epoch(model, trainer, data_loader, device, debug=False):
                         output = timestep_output if output is None else output + timestep_output
             
             # Compute accuracy
+            if isinstance(output, tuple):
+                output = output[0]
             predictions = torch.argmax(output, dim=1)
             correct = (predictions == targets).sum().item()
             total_correct += correct
             total_samples += targets.size(0)
+            
+            # Note: output is now scores, not spikes, so we don't count it as spikes
             
             # Update progress bar
             acc = 100.0 * total_correct / total_samples if total_samples > 0 else 0.0
@@ -397,7 +459,7 @@ def evaluate(model, data_loader, device, debug=False, max_batches=None):
                     print(f"\nEval input shapes - sequences: {sequences.shape}, targets: {targets.shape}")
                 
                 # Move data to device
-                sequences = sequences.to(device)
+                sequences = sequences.to(device, non_blocking=True)
                 targets = targets.to(device)
                 
                 # Reset model state at beginning of each sequence
@@ -423,14 +485,14 @@ def evaluate(model, data_loader, device, debug=False, max_batches=None):
                     # Get current timestep data
                     x_t = sequences[t]
                     
-                    # Forward pass
-                    timestep_output = model(x_t)
+                    # Forward pass - get scores and features
+                    spikes_t, scores_t, fc_out_t = model(x_t, return_features=True)
                     
-                    # Initialize or accumulate output
+                    # Initialize or accumulate scores (not spikes)
                     if output is None:
-                        output = timestep_output
+                        output = scores_t
                     else:
-                        output += timestep_output
+                        output += scores_t
                 
                 # The output should now have shape [batch_size, num_classes]
                 if debug and batch_idx == 0:
@@ -551,8 +613,41 @@ def main():
     model = build_backbone(cfg)
     model = model.to(device)
     
+    # Ensure all submodules are properly moved to device
+    # This is important for the calibration to work correctly
+    for module in model.modules():
+        if hasattr(module, 'to'):
+            module.to(device)
+    
     # Create algorithm-specific trainer
     trainer = create_trainer(model, cfg)
+    
+    # Move trainer to the same device as the model
+    if trainer is not None:
+        trainer.to(device)
+    
+    # Optional, principled pre-training calibration (no labels, no grads)
+    if args.calibrate or (cfg.get('calibration', {}).get('enabled', False)):
+        from src.calibration import calibrate_thresholds
+        calib_cfg = cfg.get('calibration', {})
+        print("Running spike-threshold calibration...")
+        final_thr = calibrate_thresholds(
+            model=model,
+            loader=train_loader,
+            device=device,
+            target_rate=calib_cfg.get('target_rate', 0.02),
+            batches=calib_cfg.get('batches', 10),
+            iters=calib_cfg.get('iters', 3),
+            tol=calib_cfg.get('tolerance', 0.50),
+            min_th=calib_cfg.get('min_threshold', 0.05),
+            max_th=calib_cfg.get('max_threshold', 2.00),
+            verbose=True,
+        )
+        # Save thresholds for reproducibility
+        os.makedirs('checkpoints', exist_ok=True)
+        with open('checkpoints/thresholds_calibrated.json', 'w') as f:
+            json.dump(final_thr, f, indent=2)
+        print("Saved calibrated thresholds: checkpoints/thresholds_calibrated.json")
     
     # Print model information
     print(f"Model: {type(model).__name__}")
@@ -568,6 +663,9 @@ def main():
         # Training phase
         train_metrics = train_epoch(model, trainer, train_loader, device, debug=cfg.get('debug', False))
         print(f"Train accuracy: {train_metrics['accuracy']:.2f}%")
+        
+        # Print readout weights norm to monitor learning
+        print(f"|W_ro|={model.readout_weights.norm().item():.4f}")
         
         # Validation phase
         val_metrics = evaluate(model, val_loader, device, debug=cfg.get('debug', False))

@@ -5,13 +5,13 @@ eta_w: 0.001         # Hebbian main weight learning rate (must match HLOPTrainer
 tau: 0.010          # 10 ms time constant
 
 # HLOP training parameters
-epochs: 25           # epochs per task
+epochs: 100          # same budget as LT-Gate
 weight_decay: 0.0001 # L2 regularization
 
 # Training parameters
-batch_size: 32
-epochs_task1: 25
-epochs_task2: 25
+batch_size: 32       # same as LT-Gate
+epochs_task1: 50     # for two-task continual learning
+epochs_task2: 50     # total = 100 epochs
 lr: 0.001
 weight_decay: 0.0001
 

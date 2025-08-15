@@ -61,10 +61,10 @@ class DualLIFNeuron(nn.Module):
         assert reset_mechanism in ["subtract", "zero"]
         self.reset_mechanism = reset_mechanism
         
-        # Initialize weights as identity matrix by default
-        # These weights map input currents to membrane potentials
-        self.register_parameter('weight_fast', nn.Parameter(torch.eye(num_neurons)))
-        self.register_parameter('weight_slow', nn.Parameter(torch.eye(num_neurons)))
+        # For simple neuron layers, we don't need weight matrices
+        # Input currents directly affect membrane potentials
+        self.register_parameter('weight_fast', nn.Parameter(torch.ones(1)))
+        self.register_parameter('weight_slow', nn.Parameter(torch.ones(1)))
         
         # Spike counters for monitoring
         self.spike_count_fast = 0
@@ -83,12 +83,17 @@ class DualLIFNeuron(nn.Module):
         batch_size = input_current.shape[0]
         
         # Map input to membrane potentials for both compartments
-        current_fast = torch.matmul(input_current, self.weight_fast)
-        current_slow = torch.matmul(input_current, self.weight_slow)
+        # Use scalar weights for simple scaling
+        # Ensure weights are on the same device as input
+        weight_fast = self.weight_fast.to(input_current.device)
+        weight_slow = self.weight_slow.to(input_current.device)
+        current_fast = input_current * weight_fast
+        current_slow = input_current * weight_slow
         
         # Expand membrane potentials to match batch size
-        membrane_fast_batch = self.membrane_fast.unsqueeze(0).expand(batch_size, -1)
-        membrane_slow_batch = self.membrane_slow.unsqueeze(0).expand(batch_size, -1)
+        # Ensure membrane potentials are on the same device as input
+        membrane_fast_batch = self.membrane_fast.to(input_current.device).unsqueeze(0).expand(batch_size, -1)
+        membrane_slow_batch = self.membrane_slow.to(input_current.device).unsqueeze(0).expand(batch_size, -1)
         
         # Decay and integrate
         membrane_fast_batch = self.decay_fast * membrane_fast_batch + current_fast
@@ -108,8 +113,8 @@ class DualLIFNeuron(nn.Module):
         
         # Store last batch element's membrane potentials for next time step
         with torch.no_grad():
-            self.membrane_fast.copy_(membrane_fast_batch[-1].detach())
-            self.membrane_slow.copy_(membrane_slow_batch[-1].detach())
+            self.membrane_fast.copy_(membrane_fast_batch[-1].detach().to(self.membrane_fast.device))
+            self.membrane_slow.copy_(membrane_slow_batch[-1].detach().to(self.membrane_slow.device))
         
         # Update spike variance tracking
         if batch_size > 1:  # Only calculate variance if we have a batch
@@ -118,12 +123,18 @@ class DualLIFNeuron(nn.Module):
             mean_slow = spikes_slow.mean(dim=0)
             
             # Update variance estimates with exponential decay
-            self.variance_fast.mul_(1-self.lam).add_(
+            # Ensure variance buffers are on the same device as the computation
+            variance_fast = self.variance_fast.to(input_current.device)
+            variance_slow = self.variance_slow.to(input_current.device)
+            variance_fast.mul_(1-self.lam).add_(
                 ((mean_fast - mean_fast.mean())**2) * self.lam
             )
-            self.variance_slow.mul_(1-self.lam).add_(
+            variance_slow.mul_(1-self.lam).add_(
                 ((mean_slow - mean_slow.mean())**2) * self.lam
             )
+            # Copy back to the original device
+            self.variance_fast.copy_(variance_fast.to(self.variance_fast.device))
+            self.variance_slow.copy_(variance_slow.to(self.variance_slow.device))
         
         # Merge spikes from both compartments (any spike counts)
         merged_spikes = torch.clamp(spikes_fast + spikes_slow, 0, 1)
@@ -135,6 +146,20 @@ class DualLIFNeuron(nn.Module):
             self.spike_count_total += merged_spikes.sum().item()
         
         return spikes_fast, spikes_slow, merged_spikes
+    
+    def to(self, *args, **kwargs):
+        """Override to ensure all buffers and parameters are moved to the correct device"""
+        result = super().to(*args, **kwargs)
+        device = torch._C._nn._parse_to(*args, **kwargs)[0]  # get target device
+        # move buffers manually
+        self.membrane_fast = self.membrane_fast.to(device)
+        self.membrane_slow = self.membrane_slow.to(device)
+        self.variance_fast = self.variance_fast.to(device)
+        self.variance_slow = self.variance_slow.to(device)
+        # Also ensure parameters are on the correct device
+        self.weight_fast = self.weight_fast.to(device)
+        self.weight_slow = self.weight_slow.to(device)
+        return result
     
     def reset_state(self):
         """Reset neuron state (membrane potentials, variance tracking, spike counts)"""

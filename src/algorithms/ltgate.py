@@ -4,7 +4,8 @@ import numpy as np
 import logging
 from collections import defaultdict
 
-from src.layers.lt_conv import LTConv
+from ..layers.lt_conv import LTConv
+from ..layers.dual_conv_lif import DualConvLIF
 
 # Configure logging
 logging.basicConfig(
@@ -58,9 +59,16 @@ class LTGateTrainer:
         self.ltconv_layers = {}
         
         for name, m in model.named_modules():
-            if isinstance(m, LTConv):
-                # Initialize trace with appropriate shape matching the input to this layer
-                self.traces[name] = torch.zeros_like(m.conv_fast.weight[0])
+            if isinstance(m, (LTConv, DualConvLIF)):
+                # Initialize trace with appropriate shape for input to this layer
+                # For conv layers, we need to track input activity
+                if hasattr(m, 'conv_fast'):
+                    # Initialize trace with the same shape as a single input to this conv layer
+                    # This will be [in_channels, kernel_size, kernel_size]
+                    self.traces[name] = torch.zeros_like(m.conv_fast.weight[0])
+                else:
+                    # Fallback for other layer types
+                    self.traces[name] = torch.zeros(1)
                 
                 # Set the learning rate for this layer
                 m.eta_w = self.eta
@@ -68,12 +76,16 @@ class LTGateTrainer:
                 # Store reference to LTConv layers for diagnostics
                 self.ltconv_layers[name] = m
                 
-                # Configure gamma strategy for this layer
-                if self.gamma_strategy == 'fixed':
+                # Configure gamma strategy for this layer (only for LTConv)
+                if isinstance(m, LTConv) and self.gamma_strategy == 'fixed':
                     m.gate.force_gamma(self.gamma_fixed_value)
                 
-                # Initialize gamma history for this layer
-                self.gamma_history[name] = torch.zeros_like(m.gate.var_f)
+                # Initialize gamma history for this layer (only for LTConv)
+                if isinstance(m, LTConv):
+                    self.gamma_history[name] = torch.zeros_like(m.gate.var_f)
+                else:
+                    # For DualConvLIF, we don't track gamma history
+                    self.gamma_history[name] = torch.zeros(1)  # Dummy tensor
         
         # Log diagnostic setup
         if self.enable_diagnostics:
@@ -89,57 +101,89 @@ class LTGateTrainer:
         # Other training parameters
         self.pre_decay = cfg.get('pre_decay', 0.8)  # Decay factor for presynaptic traces
     
+    def to(self, device):
+        """Move trainer traces to the specified device"""
+        for k in self.traces:
+            self.traces[k] = self.traces[k].to(device)
+        for k in self.gamma_history:
+            self.gamma_history[k] = self.gamma_history[k].to(device)
+        return self
+    
     @torch.no_grad()
-    def step(self, seq):
+    def step(self, seq, targets=None):
         """
         Process a sequence batch and apply LT-Gate updates.
         
         Args:
             seq (torch.Tensor): Input sequence of shape [time_steps, batch_size, channels, height, width]
+            targets (torch.Tensor, optional): Target labels for supervised learning
             
         Returns:
-            tuple: (final output spikes, reconstruction loss)
+            tuple: (final scores, average loss)
         """
-        device = seq.device
-        
-        # Ensure sequence is in [T,B,C,H,W] format
-        if seq.size(0) != 200:  # Not in time-first format
-            seq = seq.transpose(0, 1)  # [B,T,C,H,W] -> [T,B,C,H,W]
-        
-        time_steps, batch_size = seq.shape[0], seq.shape[1]
-        
-        # Reset model state at the beginning of each sequence
+        # [B,T,...] -> [T,B,...] if needed
+        if seq.size(0) != 200:
+            seq = seq.transpose(0, 1)
+        T, B = seq.shape[0], seq.shape[1]
+
         self._reset_state()
-        
-        # Track final output and loss
-        final_output = None
+
+        final_scores = None  # accumulate linear scores over time
+        feat_sum = None      # accumulate fc features over time
         total_loss = 0.0
-        
-        # Process each time step in the sequence
-        for t in range(time_steps):
-            x_t = seq[t]  # Current input frame [batch_size, channels, height, width]
-            
-            # Update presynaptic traces before forward pass
+
+        for t in range(T):
+            x_t = seq[t]
             self._update_traces(x_t)
-            
-            # Forward pass through the model
-            output = self.model(x_t)  # [batch_size, out_channels, height, width]
-            final_output = output
-            
-            # Apply local plasticity updates and compute loss
-            step_loss = self._apply_lt_gate_updates()
-            total_loss += step_loss
-        
-        # Increment step counter for diagnostics
+
+            # ask model for spikes/scores/features
+            spikes_t, scores_t, fc_out_t = self.model(x_t, return_features=True)
+
+            final_scores = scores_t if final_scores is None else (final_scores + scores_t)
+            feat_sum     = fc_out_t if feat_sum is None else (feat_sum + fc_out_t)
+
+            total_loss += self._apply_lt_gate_updates()
+
+        # --- supervised readout update (safe one-hot + delta rule) ---
+        if targets is not None:
+            # ensure proper dtype/device/shape
+            targets = targets.detach().to(final_scores.device).to(torch.long).view(-1)
+            num_classes = final_scores.size(-1)
+
+            # guard: invalid labels → skip update instead of crashing
+            if targets.numel() == 0 or targets.min().item() < 0 or targets.max().item() >= num_classes:
+                print(f"[LTGateTrainer] Bad targets: dtype={targets.dtype}, "
+                      f"min={targets.min().item() if targets.numel() else 'NA'}, "
+                      f"max={targets.max().item() if targets.numel() else 'NA'}, "
+                      f"num_classes={num_classes}. Skipping supervised update.")
+            else:
+                y = torch.nn.functional.one_hot(targets, num_classes=num_classes).float()
+
+                # Use the actual pre-readout features (fc_out accumulated over time)
+                # feat_sum is already the accumulated fc_out from the time loop
+                W = self.model.readout_weights  # [10, 256]
+
+                # Simple delta rule update using the accumulated features
+                pred = torch.softmax(final_scores, dim=-1)  # [B, 10]
+                err  = (pred - y)                           # [B, 10]
+
+                lr_ro = 1e-3
+                lam   = 1e-4
+                # Update: W += lr * error * features
+                gradW = err.T @ feat_sum / targets.size(0) + lam * W  # [10, 256]
+                with torch.no_grad():
+                    W -= lr_ro * gradW
+
+                # optional scalar loss for logging
+                total_loss += torch.nn.functional.cross_entropy(final_scores, targets).item()
+
+        # diagnostics cadence
         self.step_count += 1
-        
-        # Run edge-case diagnostics at specified intervals
         if self.enable_diagnostics and self.step_count % self.tracking_interval == 0:
             self._run_diagnostics()
-        
-        # Return average loss over sequence
-        avg_loss = total_loss / time_steps
-        return final_output, avg_loss
+
+        avg_loss = total_loss / max(T, 1)
+        return final_scores, avg_loss
     
     def _run_diagnostics(self):
         """
@@ -167,6 +211,10 @@ class LTGateTrainer:
         for name in self.ltconv_layers.keys():
             if name in self.weight_violations and self.weight_violations[name] > 0:
                 logger.info(f"  Layer {name}: {self.weight_violations[name]} weight constraint violations")
+        
+        # Log spike statistics every 10 steps
+        if self.step_count % 10 == 0:
+            self._log_spike_statistics()
     
     def _check_gamma_status(self, name, layer):
         """
@@ -174,8 +222,12 @@ class LTGateTrainer:
         
         Args:
             name (str): Layer name
-            layer (LTConv): LTConv layer to check
+            layer (LTConv or DualConvLIF): Layer to check
         """
+        # Only check gamma for LTConv layers
+        if not isinstance(layer, LTConv):
+            return
+            
         # Get current gamma values
         current_gamma = layer.gate.selector()
         
@@ -255,7 +307,7 @@ class LTGateTrainer:
         
         Args:
             name (str): Layer name
-            layer (LTConv): LTConv layer to check
+            layer (LTConv or DualConvLIF): Layer to check
         """
         # Check weight precision (Loihi uses 8-bit weights)
         precision_loss = False
@@ -285,18 +337,41 @@ class LTGateTrainer:
                 logger.warning(f"Layer {name} has significant quantization error: fast={fast_error:.4f}, slow={slow_error:.4f}")
                 precision_loss = True
         
-        # Check neuron dynamics constraints
-        # Loihi has specific constraints on time constants and thresholds
-        if layer.cell.tau_fast < 1e-3 or layer.cell.tau_slow < 1e-3:
-            logger.warning(f"Layer {name} has time constants below Loihi minimum (1ms)")
-        
-        # Threshold should be within reasonable range for Loihi
-        if layer.cell.threshold > 1.0 or layer.cell.threshold < 0.01:
-            logger.warning(f"Layer {name} threshold {layer.cell.threshold:.4f} may not be suitable for Loihi")
+        # Check neuron dynamics constraints (only for LTConv)
+        if isinstance(layer, LTConv):
+            # Loihi has specific constraints on time constants and thresholds
+            if layer.cell.tau_fast < 1e-3 or layer.cell.tau_slow < 1e-3:
+                logger.warning(f"Layer {name} has time constants below Loihi minimum (1ms)")
+            
+            # Threshold should be within reasonable range for Loihi
+            if layer.cell.threshold > 1.0 or layer.cell.threshold < 0.01:
+                logger.warning(f"Layer {name} threshold {layer.cell.threshold:.4f} may not be suitable for Loihi")
         
         # Log summary for this layer
         if precision_loss:
             logger.info(f"Layer {name} may encounter precision loss when mapped to Loihi hardware")
+
+    def _log_spike_statistics(self):
+        """
+        Log spike statistics for all layers to monitor learning progress.
+        """
+        logger.info("=== Spike Statistics ===")
+        for name, layer in self.ltconv_layers.items():
+            if hasattr(layer, 'last_spikes_fast') and hasattr(layer, 'last_spikes_slow'):
+                # Calculate spike rates
+                s_f_rate = layer.last_spikes_fast.float().mean().item()
+                s_s_rate = layer.last_spikes_slow.float().mean().item()
+                
+                # Calculate weight norms
+                if hasattr(layer, 'conv_fast') and hasattr(layer, 'conv_slow'):
+                    w_f_norm = layer.conv_fast.weight.norm().item()
+                    w_s_norm = layer.conv_slow.weight.norm().item()
+                    logger.info(f"  {name}: fast_rate={s_f_rate:.4f}, slow_rate={s_s_rate:.4f}, |W_f|={w_f_norm:.4f}, |W_s|={w_s_norm:.4f}")
+                else:
+                    logger.info(f"  {name}: fast_rate={s_f_rate:.4f}, slow_rate={s_s_rate:.4f}")
+            else:
+                logger.info(f"  {name}: no spike data available")
+        logger.info("======================")
 
     
     def _update_traces(self, x_t):
@@ -306,24 +381,30 @@ class LTGateTrainer:
         Args:
             x_t (torch.Tensor): Current input frame [batch_size, channels, height, width]
         """
-        pre_flat = x_t.flatten(start_dim=2)  # [batch_size, channels, flattened_spatial]
-        
-        # For input layer, the trace is directly from the input
-        self.current_input = pre_flat
+        # Store current input for potential use
+        self.current_input = x_t
         
         # Decay existing traces and add new activity
         for name in self.traces.keys():
             # Decay existing trace
             self.traces[name] = self.traces[name] * self.pre_decay
             
-            # For the input layer, update with current input
-            # Note: for deeper layers, this is more complex and requires tracking
-            # activity through the network. For simplicity, we're just using the
-            # input for now, but in a full implementation we would track per-layer.
-            if name.endswith('conv1'):
-                # Assuming first conv layer gets direct input
-                batch_avg = pre_flat.mean(0)  # Average across batch
-                self.traces[name] = self.traces[name] + batch_avg.flatten()
+            # For conv layers, we'll use a simplified approach
+            # In a full implementation, we would track activity through the network
+            if name.startswith('conv'):  # All conv layers
+                # Average across batch and spatial dimensions to get per-channel activity
+                # Shape: [batch_size, channels, height, width] -> [channels]
+                channel_activity = x_t.mean(dim=(0, 2, 3))  # Average over batch, height, width
+                
+                # Reshape to match the trace shape [in_channels, kernel_size, kernel_size]
+                trace_shape = self.traces[name].shape
+                if len(trace_shape) == 3:  # [in_channels, kernel_size, kernel_size]
+                    # Expand channel activity to match kernel size
+                    expanded_activity = channel_activity.unsqueeze(1).unsqueeze(2).expand_as(self.traces[name])
+                    self.traces[name] = self.traces[name] + expanded_activity
+                else:
+                    # Fallback for unexpected shapes
+                    self.traces[name] = self.traces[name] + channel_activity.mean()
 
     def _apply_lt_gate_updates(self):
         """
@@ -340,11 +421,22 @@ class LTGateTrainer:
             # Get current traces for this layer
             traces = self.traces[name]
             
-            # Apply local plasticity update
-            recon_loss = layer.local_update(traces, self.eta)
-            total_loss += recon_loss
+            # Get stored spikes from the layer (stored during forward pass)
+            if hasattr(layer, 'last_spikes_fast') and hasattr(layer, 'last_spikes_slow'):
+                s_f = layer.last_spikes_fast  # [B, C*H*W]
+                s_s = layer.last_spikes_slow  # [B, C*H*W]
+                
+                # Apply local plasticity update with real spikes
+                recon_loss = layer.local_update(traces, s_f, s_s)
+                total_loss += recon_loss
+            else:
+                # Fallback for layers without spike storage
+                logger.warning(f"Layer {name} missing spike storage - skipping update")
+                continue
         
         return total_loss
+
+
 
     def _reset_state(self):
         """

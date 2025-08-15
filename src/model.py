@@ -163,14 +163,16 @@ class SNNBackbone(nn.Module):
             # Readout weights
             self.readout_weights = nn.Parameter(torch.randn(10, 256) * 0.01)
     
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         """Forward pass through the network
         
         Args:
             x (torch.Tensor): Input tensor of shape [batch_size, channels, height, width]
+            return_features (bool): Whether to return intermediate features
             
         Returns:
-            torch.Tensor: Output spikes/activations of shape [batch_size, num_classes]
+            torch.Tensor or tuple: Output spikes/activations of shape [batch_size, num_classes]
+                                  If return_features=True, returns (spikes, scores, fc_out)
         """
         # Process through convolutional layers
         x = self.conv0(x)
@@ -198,7 +200,12 @@ class SNNBackbone(nn.Module):
         else:
             spikes = self.readout(readout_input)
         
-        return spikes
+        if return_features:
+            # For return_features=True, return (spikes, spikes, fc_out)
+            # The second spikes acts as "scores" - in this case they're the same
+            return spikes, spikes, fc_out
+        else:
+            return spikes
     
     def reset_state(self):
         """Reset all neuron states in the network"""

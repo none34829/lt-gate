@@ -1,0 +1,10 @@
+{
+  "conv_layers.0": 0.8075838050513994,
+  "conv_layers.0.dual_lif": 0.5,
+  "conv_layers.1": 0.5,
+  "conv_layers.1.dual_lif": 0.5,
+  "conv_layers.2": 0.5,
+  "conv_layers.2.dual_lif": 0.5,
+  "fc_layers.0": 0.5,
+  "fc_layers.1": 0.125
+}

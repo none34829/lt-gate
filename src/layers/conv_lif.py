@@ -2,7 +2,7 @@ import torch  # type: ignore
 import torch.nn as nn  # type: ignore
 import torch.nn.functional as F  # type: ignore
 
-from src.layers.lif_neuron import LIFNeuron
+from .lif_neuron import LIFNeuron
 
 class ConvLIF(nn.Module):
     """

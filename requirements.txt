@@ -12,13 +12,16 @@ pingouin>=0.5.4  # For robust effect-size & Bayesian tests
 jupyter>=1.0.0
 tqdm>=4.65.0
 
-# Neuromorphic hardware
-akida>=2.13.0
-cnn2snn>=2.13.0
-quantizeml>=2.13.0
+# Neuromorphic hardware - Note: Some packages may have Python version compatibility issues
+# with Python 3.11. Consider using Python 3.10 if these fail to install.
+akida>=2.15.0
+cnn2snn>=2.15.0
+quantizeml>=0.18.1
 akida-models>=1.7.0
 
 # Testing and development
 pytest>=7.3.1
-mypy>=1.5.1
-types-h5py>=3.8.0  # Type stubs for h5py
+mypy>=1.17.1
+
+# Note: types-h5py is not available for Python 3.11
+# Consider using Python 3.10 if type stubs are needed
