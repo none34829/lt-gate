@@ -74,9 +74,8 @@ Optional dependencies:
 
 ## Installation
 
-1. Clone the repository:
+1. After cloning the repository:
 ```bash
-git clone https://github.com/ansschh/lt-gate.git
 cd lt-gate
 ```
 
